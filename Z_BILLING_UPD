@@ -1,0 +1,144 @@
+FUNCTION zcomv_billing_date_upd.
+*"----------------------------------------------------------------------
+*"*"Local Interface:
+*"  IMPORTING
+*"     REFERENCE(IN_XVBRK) TYPE  VBRK
+*"     REFERENCE(IN_XVBRP) TYPE  VBRP
+*"     REFERENCE(IN_VBAK) TYPE  VBAK
+*"     REFERENCE(IN_VBAP) TYPE  VBAP
+*"     REFERENCE(IN_VBKD) TYPE  VBKD
+*"  CHANGING
+*"     REFERENCE(CS_LIKP) TYPE  LIKP
+*"     REFERENCE(CS_LIPS) TYPE  LIPS
+*"----------------------------------------------------------------------
+*& Development DDID:  ZDDE-00063876                                      *
+*& Development FSID:  ZFSE-00063875                                      *
+*& Updating the Billing Document                                         *
+*& Exit Include:ZCOMV_RV60AFZC_FILL_VBRK_VBRP                            *
+*& USEREXIT_FILL_VBRK_VBRP  in include RV60AFZC                          *
+*& this Funciton module is configured with ZEXIT_CHECK criterial and     *
+*&  based on the include called, this function module will run.          *
+*&-----------------------------------------------------------------------*
+*& Change Log:                                                           *
+*&                                                                       *
+*&  Who            Date          Text                                    *
+*& GADERA1        23-Jul-2024   1100249573 Initial Version               *
+*& NIKITHE1       11-Jul-2025   1100271846 Updating The delivery date    *
+*& GANESKAD       23-Jul-2025   1100274511 Changed the conditions        *
+*------------------------------------------------------------------------*
+  DATA:lv_usage TYPE abrvw,
+       lv_kdkg2 TYPE kdkg2.
+
+  CONSTANTS:lc_bdt TYPE zcomv_source VALUE 'VBKD-FKDAT',
+            lc_pod TYPE zcomv_source VALUE 'LIKP-PODAT',
+            lc_sd  TYPE zcomv_source VALUE 'VBRK-ERDAT'.
+
+**Get scenario from ZCOMV_SCENARIO to update proper billing date
+  SELECT vkorg,
+  vtweg,
+  spart,
+  fkart,
+  prodh,
+  kdkg2,
+  zusage,
+  zsource FROM zcomv_scenarios
+INTO TABLE @DATA(lt_source)
+WHERE vkorg = @in_xvbrk-vkorg AND
+     vtweg = @in_xvbrk-vtweg AND
+     spart = @in_xvbrk-spart AND
+     fkart = @in_xvbrk-fkart
+ORDER BY PRIMARY KEY.
+  IF sy-subrc = 0.
+**    Get Usage from VBAP
+    SELECT SINGLE posnr,
+           vkaus
+      FROM vbap
+      INTO @DATA(ls_vbap)
+      WHERE vbeln = @cs_lips-vgbel AND
+            posnr = @cs_lips-vgpos.
+    IF sy-subrc NE 0.
+      CLEAR ls_vbap.
+    ENDIF.
+*    Get KDKG2 from VBAP
+    SELECT posnr,
+           kdkg2 UP TO 1 ROWS
+      FROM vbkd
+      INTO @DATA(ls_vbkd)
+      WHERE vbeln = @cs_lips-vgbel
+      ORDER BY PRIMARY KEY.
+    ENDSELECT.
+    IF sy-subrc NE 0.
+      CLEAR ls_vbkd.
+    ENDIF.
+*---Fetching Usage from VBAK
+    SELECT SINGLE abrvw
+       FROM vbak
+      INTO @lv_usage
+      WHERE vbeln = @cs_lips-vgbel.
+
+** Priority wise validation of getting source of due date
+*---Product Hierarchy
+    IF in_xvbrp-prodh IS NOT INITIAL.
+      DATA(lv_len) = strlen( in_xvbrp-prodh ).
+      lv_len = lv_len - 4.
+      DATA(lv_prod) = in_xvbrp-prodh+lv_len(4).
+    ENDIF.
+
+    IF lv_usage IS INITIAL.
+      lv_usage = ls_vbap-vkaus.
+    ENDIF.
+*---Customer group
+    lv_kdkg2 = ls_vbkd-kdkg2.
+    ASSIGN lt_source[ prodh = lv_prod
+                      kdkg2 = lv_kdkg2
+                      zusage = lv_usage ] TO FIELD-SYMBOL(<lfs_source>) ELSE UNASSIGN.
+    IF sy-subrc NE 0 AND <lfs_source> IS NOT ASSIGNED.
+      ASSIGN lt_source[ prodh = lv_prod kdkg2 = lv_kdkg2 zusage = space ] TO <lfs_source> ELSE UNASSIGN.
+      IF sy-subrc NE 0 AND <lfs_source> IS NOT ASSIGNED.
+        ASSIGN lt_source[ prodh = lv_prod  zusage = lv_usage kdkg2 = space ] TO <lfs_source> ELSE UNASSIGN.
+        IF sy-subrc NE 0 AND <lfs_source> IS NOT ASSIGNED.
+          ASSIGN lt_source[ prodh = lv_prod kdkg2 = space zusage = space ] TO <lfs_source> ELSE UNASSIGN.
+          IF sy-subrc NE 0 AND <lfs_source> IS NOT ASSIGNED.
+            ASSIGN lt_source[ kdkg2 = lv_kdkg2 zusage = lv_usage prodh = space ] TO <lfs_source> ELSE UNASSIGN.
+            IF sy-subrc NE 0 AND <lfs_source> IS NOT ASSIGNED.
+              ASSIGN lt_source[ kdkg2 = lv_kdkg2 prodh = space zusage = space ] TO <lfs_source> ELSE UNASSIGN.
+              IF sy-subrc NE 0 AND <lfs_source> IS NOT ASSIGNED.
+                ASSIGN lt_source[ zusage = lv_usage kdkg2 = space prodh = space ] TO <lfs_source> ELSE UNASSIGN.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+    CLEAR:lv_kdkg2,lv_usage,lv_prod,lv_len.
+
+    IF <lfs_source> IS ASSIGNED AND <lfs_source>-zsource IS NOT INITIAL.
+      DATA(lv_source) = <lfs_source>-zsource.
+      UNASSIGN <lfs_source>.
+    ENDIF.
+    IF lv_source IS NOT INITIAL.
+      IF lv_source = lc_sd.
+**  Current User date
+        cs_likp-fkdat = sy-datlo.
+      ELSEIF lv_source = lc_bdt.
+        SELECT fkdat FROM vbkd UP TO 1 ROWS
+          INTO @DATA(lv_fkdat)
+          WHERE vbeln = @cs_lips-vgbel
+          ORDER BY PRIMARY KEY.
+        ENDSELECT.
+        IF lv_fkdat IS NOT INITIAL.
+          cs_likp-fkdat = lv_fkdat.
+        ENDIF.
+
+      ELSEIF lv_source = lc_pod.
+        SELECT SINGLE podat FROM likp
+        INTO @DATA(lv_podat)
+        WHERE vbeln = @cs_lips-vbeln.
+        IF lv_podat IS NOT INITIAL.
+          cs_likp-fkdat = lv_podat .
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+  CLEAR lv_source.
+ENDFUNCTION.
